@@ -117,7 +117,8 @@ jobs:
         with:
           # renovate: datasource=github-release-attachments depName=astral-sh/uv
           version: "0.13.6"
-          checksum: "f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645"
+          # ARK-81 bench: checksum of the aarch64 archive (upstream pins the x86_64 one; the Linux jobs run on ARM64 here).
+          checksum: "229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d"
           enable-cache: false
       - name: Find the fuzz corpus on main
         if: ${{ github.event_name == 'push' }}
@@ -407,7 +408,8 @@ jobs:
         with:
           # renovate: datasource=github-release-attachments depName=astral-sh/uv
           version: "0.13.6"
-          checksum: "f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645"
+          # ARK-81 bench: checksum of the aarch64 archive (upstream pins the x86_64 one; the Linux jobs run on ARM64 here).
+          checksum: "229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d"
           enable-cache: "true"
           cache-python: true
       - name: ty mdtests (GitHub annotations)
@@ -551,9 +553,11 @@ jobs:
           node-version: 26.10.0
           cache: "npm"
           cache-dependency-path: playground/package-lock.json
-      - uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
-        with:
-          version: v0.13.1
+      # ARK-81 bench: jetli/wasm-pack-action installs the x86_64 binary whatever the runner; same version, aarch64 build.
+      - name: "outrun: install wasm-pack v0.13.1 (aarch64)"
+        run: |
+          curl -fsSL https://github.com/rustwasm/wasm-pack/releases/download/v0.13.1/wasm-pack-v0.13.1-aarch64-unknown-linux-musl.tar.gz | tar -xz -C /tmp
+          mkdir -p ~/.cargo/bin && cp /tmp/wasm-pack-v0.13.1-aarch64-unknown-linux-musl/wasm-pack ~/.cargo/bin/
       - name: "Test ruff_wasm"
         run: |
           cd crates/ruff_wasm
