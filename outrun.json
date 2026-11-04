@@ -1,0 +1,14 @@
+{
+  "inputs": ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".github/workflows/ci.yaml"],
+  "env": ["CARGO_PROFILE_DEV_DEBUG"],
+  "suites": [],
+  "trustedRef": "refs/heads/bench/engine",
+  "commands": [
+    { "name": "fmt", "run": "cargo fmt --all --check", "inputs": ["crates/**", "!crates/**/resources/**", "rustfmt.toml", ".rustfmt.toml"] },
+    { "name": "clippy", "run": "cargo clippy --workspace --all-targets --all-features --locked; clippy wasm", "inputs": ["**/*", "!docs/**"] },
+    { "name": "test-linux", "run": "cargo insta test (nextest), doctests, parser without stacker, ty dogfood, cargo doc", "inputs": ["**/*", "!docs/**"] },
+    { "name": "test-outrun-macos", "run": "cargo nextest (macOS)", "inputs": ["**/*", "!docs/**"] },
+    { "name": "test-wasm", "run": "wasm-pack test", "inputs": ["**/*", "!docs/**"] },
+    { "name": "build-msrv", "run": "cargo build (msrv)", "inputs": ["**/*", "!docs/**"] }
+  ]
+}

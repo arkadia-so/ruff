@@ -1,5 +1,6 @@
 name: CI
-# ARK-81 bench: upstream ci.yaml on the fork's main (so rust-cache saves as on upstream main), runs-on swapped to
+# ARK-81 bench, engine variant (branch bench/engine): each cargo job is a command unit of outrun.json, looked up
+# first and replayed on a hit; rust-cache also saves on bench/engine. Base, outrun as is: upstream ci.yaml on the fork's main (so rust-cache saves as on upstream main), runs-on swapped to
 # outrun-linux-arm64 (ARM64) and outrun-macos; a step installs rustup and gh, which outrun's images lack.
 # Kept 7 jobs: determine_changes, cargo fmt, cargo clippy, cargo test (linux), cargo test (macOS), cargo test (wasm),
 # cargo build (msrv). Dropped: Windows cargo test; python package (x64 only: setup-python architecture x64);
@@ -7,12 +8,18 @@ name: CI
 
 permissions:
   contents: read
+  id-token: write # outrun's cache (ARK-81)
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      cache:
+        description: outrun cache namespace (ARK-81 engine bench)
+        required: false
+        default: outrun
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
@@ -23,6 +30,8 @@ defaults:
     shell: bash
 
 env:
+  OUTRUN_CACHE_URL: https://turbo-cache.arkadia.so
+  OUTRUN_CACHE_TEAM: ${{ inputs.cache || 'outrun' }}
   UV_LOCKED: 1
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
@@ -329,8 +338,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: "outrun: start"
+        id: start
+        run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: "outrun: Bun"
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: "outrun: look fmt up"
+        id: look
+        run: .github/outrun/run lookup fmt
       # ARK-81 bench: outrun's images have no rustup or gh (GitHub's runner images do).
       - name: "outrun: install rustup and gh"
+        if: steps.look.outputs.run == 'true'
         run: |
           if ! command -v rustup >/dev/null; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
@@ -339,14 +359,19 @@ jobs:
           fi
           if ! command -v gh >/dev/null && [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -qq && sudo apt-get install -y -qq gh >/dev/null; fi
       - name: "Install Rust toolchain"
+        if: steps.look.outputs.run == 'true'
         run: rustup component add rustfmt
       - run: cargo fmt --all --check
+        if: steps.look.outputs.run == 'true'
+      - name: "outrun: record fmt"
+        if: success() && steps.look.outputs.run == 'true'
+        run: .github/outrun/run record fmt --key "${{ steps.look.outputs.key }}" --since ${{ steps.start.outputs.at }}
 
   cargo-clippy:
     name: "cargo clippy"
     runs-on: outrun-linux-arm64
     needs: determine_changes
-    if: ${{ needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main' }}
+    if: ${{ needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/bench/engine' }}
     timeout-minutes: 20
     env:
       CARGO_BUILD_WARNINGS: deny
@@ -354,8 +379,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: "outrun: start"
+        id: start
+        run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: "outrun: Bun"
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: "outrun: look clippy up"
+        id: look
+        run: .github/outrun/run lookup clippy
       # ARK-81 bench: outrun's images have no rustup or gh (GitHub's runner images do).
       - name: "outrun: install rustup and gh"
+        if: steps.look.outputs.run == 'true'
         run: |
           if ! command -v rustup >/dev/null; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
@@ -364,22 +400,29 @@ jobs:
           fi
           if ! command -v gh >/dev/null && [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -qq && sudo apt-get install -y -qq gh >/dev/null; fi
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.look.outputs.run == 'true'
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/bench/engine' }}
       - name: "Install Rust toolchain"
+        if: steps.look.outputs.run == 'true'
         run: |
           rustup component add clippy
           rustup target add wasm32-unknown-unknown
       - name: "Clippy"
+        if: steps.look.outputs.run == 'true'
         run: cargo clippy --workspace --all-targets --all-features --locked
       - name: "Clippy (wasm)"
+        if: steps.look.outputs.run == 'true'
         run: cargo clippy -p ruff_wasm -p ty_wasm --target wasm32-unknown-unknown --all-features --locked
+      - name: "outrun: record clippy"
+        if: success() && steps.look.outputs.run == 'true'
+        run: .github/outrun/run record clippy --key "${{ steps.look.outputs.key }}" --since ${{ steps.start.outputs.at }}
 
   cargo-test-linux:
     name: "cargo test (linux)"
     runs-on: outrun-linux-arm64
     needs: determine_changes
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/bench/engine') }}
     timeout-minutes: 20
     env:
       # Line-tables-only debug info: faster builds, backtraces still work.
@@ -388,8 +431,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: "outrun: start"
+        id: start
+        run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: "outrun: Bun"
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: "outrun: look test-linux up"
+        id: look
+        run: .github/outrun/run lookup test-linux
       # ARK-81 bench: outrun's images have no rustup or gh (GitHub's runner images do).
       - name: "outrun: install rustup and gh"
+        if: steps.look.outputs.run == 'true'
         run: |
           if ! command -v rustup >/dev/null; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
@@ -398,12 +452,15 @@ jobs:
           fi
           if ! command -v gh >/dev/null && [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -qq && sudo apt-get install -y -qq gh >/dev/null; fi
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.look.outputs.run == 'true'
         with:
           shared-key: ruff-linux-debug
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/bench/engine' }}
       - name: "Install Rust toolchain"
+        if: steps.look.outputs.run == 'true'
         run: rustup show
       - name: "Install uv"
+        if: steps.look.outputs.run == 'true'
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           # renovate: datasource=github-release-attachments depName=astral-sh/uv
@@ -413,7 +470,7 @@ jobs:
           enable-cache: "true"
           cache-python: true
       - name: ty mdtests (GitHub annotations)
-        if: ${{ needs.determine_changes.outputs.ty == 'true' }}
+        if: steps.look.outputs.run == 'true' && (needs.determine_changes.outputs.ty == 'true')
         env:
           NO_COLOR: 1
           MDTEST_GITHUB_ANNOTATIONS_FORMAT: 1
@@ -421,11 +478,14 @@ jobs:
         # This step is just to get nice GitHub annotations on the PR diff in the files-changed tab.
         run: cargo test -p ty_python_semantic --test mdtest || true
       - name: "Run tests"
+        if: steps.look.outputs.run == 'true'
         run: uv run --locked --only-dev cargo insta test --all-features --unreferenced reject --test-runner nextest --disable-nextest-doctest
       - name: "Run doctests"
+        if: steps.look.outputs.run == 'true'
         run: cargo test --doc --all-features
       # A workspace build enables stacker through the CLI crates' dependencies.
       - name: "Check parser without stacker"
+        if: steps.look.outputs.run == 'true'
         run: cargo check --locked -p ruff_python_parser --no-default-features --all-targets
       # On a PR, the annotation mdtests step above can install a Python version
       # that uv can reuse for py-fuzzer. When the annotation step is skipped (as
@@ -435,10 +495,13 @@ jobs:
       # `--python` explicitly to use the version in `PYTHON_VERSION`, even if it
       # differs from one used by the annotation mdtests.
       - name: Dogfood ty on py-fuzzer
+        if: steps.look.outputs.run == 'true'
         run: uv run --quiet --python="${PYTHON_VERSION}" --project=./python/py-fuzzer cargo run --quiet -p ty check --project=./python/py-fuzzer --color=always
       - name: Dogfood ty on ty_benchmark
+        if: steps.look.outputs.run == 'true'
         run: uv run --quiet --project=./scripts/ty_benchmark cargo run --quiet -p ty check --project=./scripts/ty_benchmark --color=always
       - name: Dogfood ty on scripts
+        if: steps.look.outputs.run == 'true'
         env:
           # Enable experimental support for installing PEP 723 script dependencies.
           TY_UV: scripts
@@ -453,6 +516,7 @@ jobs:
           cargo run --quiet -p ty check "@$RUNNER_TEMP/script-paths.txt" --color=always
       # Check for broken links in the documentation.
       - run: cargo doc --all --no-deps
+        if: steps.look.outputs.run == 'true'
         env:
           RUSTDOCFLAGS: "-D warnings"
       # Use --document-private-items so that all our doc comments are kept in
@@ -460,9 +524,13 @@ jobs:
       # crates; for now add crates here as they are warning-clean to prevent
       # regression.
       - run: cargo doc --no-deps -p ty_python_semantic -p ty_python_core -p ty_module_resolver -p ty_site_packages -p ty_combine -p ty_project -p ty_ide -p ty_wasm -p ty_vendored -p ty_static -p ty -p ty_test -p ruff_db -p ruff_python_formatter --document-private-items
+        if: steps.look.outputs.run == 'true'
         env:
           # Setting RUSTDOCFLAGS because `cargo doc --check` isn't yet implemented (https://github.com/rust-lang/cargo/issues/10025).
           RUSTDOCFLAGS: "-D warnings"
+      - name: "outrun: record test-linux"
+        if: success() && steps.look.outputs.run == 'true'
+        run: .github/outrun/run record test-linux --key "${{ steps.look.outputs.key }}" --since ${{ steps.start.outputs.at }}
 
   cargo-test-other:
     strategy:
@@ -473,7 +541,7 @@ jobs:
     name: "cargo test (${{ matrix.platform }})"
     runs-on: ${{ matrix.platform }}
     needs: determine_changes
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/bench/engine') }}
     timeout-minutes: 20
     env:
       # Line-tables-only debug info: faster builds, backtraces still work.
@@ -484,8 +552,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: "outrun: start"
+        id: start
+        run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: "outrun: Bun"
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: "outrun: look test-${{ matrix.platform }} up"
+        id: look
+        run: .github/outrun/run lookup test-${{ matrix.platform }}
       # ARK-81 bench: outrun's images have no rustup or gh (GitHub's runner images do).
       - name: "outrun: install rustup and gh"
+        if: steps.look.outputs.run == 'true'
         run: |
           if ! command -v rustup >/dev/null; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
@@ -494,15 +573,17 @@ jobs:
           fi
           if ! command -v gh >/dev/null && [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -qq && sudo apt-get install -y -qq gh >/dev/null; fi
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.look.outputs.run == 'true'
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/bench/engine' }}
           # Fix for https://github.com/Swatinem/rust-cache/issues/341
           cache-bin: "false"
       - name: "Install Rust toolchain"
+        if: steps.look.outputs.run == 'true'
         run: rustup show
       # Renovate needs a separate version/checksum pair for each archive.
       - name: "Install uv (Windows)"
-        if: runner.os == 'Windows'
+        if: steps.look.outputs.run == 'true' && (runner.os == 'Windows')
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           # renovate: datasource=github-release-attachments depName=astral-sh/uv
@@ -511,7 +592,7 @@ jobs:
           enable-cache: "true"
           cache-python: true
       - name: "Install uv (macOS)"
-        if: runner.os == 'macOS'
+        if: steps.look.outputs.run == 'true' && (runner.os == 'macOS')
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           # renovate: datasource=github-release-attachments depName=astral-sh/uv
@@ -520,22 +601,37 @@ jobs:
           enable-cache: "true"
           cache-python: true
       - name: "Run tests"
+        if: steps.look.outputs.run == 'true'
         run: |
           uv run --locked --only-dev cargo nextest run --all-features --profile ci
           cargo test --all-features --doc
+      - name: "outrun: record test-${{ matrix.platform }}"
+        if: success() && steps.look.outputs.run == 'true'
+        run: .github/outrun/run record test-${{ matrix.platform }} --key "${{ steps.look.outputs.key }}" --since ${{ steps.start.outputs.at }}
 
   cargo-test-wasm:
     name: "cargo test (wasm)"
     runs-on: outrun-linux-arm64
     needs: determine_changes
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/bench/engine') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: "outrun: start"
+        id: start
+        run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: "outrun: Bun"
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: "outrun: look test-wasm up"
+        id: look
+        run: .github/outrun/run lookup test-wasm
       # ARK-81 bench: outrun's images have no rustup or gh (GitHub's runner images do).
       - name: "outrun: install rustup and gh"
+        if: steps.look.outputs.run == 'true'
         run: |
           if ! command -v rustup >/dev/null; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
@@ -544,34 +640,43 @@ jobs:
           fi
           if ! command -v gh >/dev/null && [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -qq && sudo apt-get install -y -qq gh >/dev/null; fi
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.look.outputs.run == 'true'
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/bench/engine' }}
       - name: "Install Rust toolchain"
+        if: steps.look.outputs.run == 'true'
         run: rustup target add wasm32-unknown-unknown
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.look.outputs.run == 'true'
         with:
           node-version: 26.10.0
           cache: "npm"
           cache-dependency-path: playground/package-lock.json
       # ARK-81 bench: jetli/wasm-pack-action installs the x86_64 binary whatever the runner; same version, aarch64 build.
       - name: "outrun: install wasm-pack v0.13.1 (aarch64)"
+        if: steps.look.outputs.run == 'true'
         run: |
           curl -fsSL https://github.com/rustwasm/wasm-pack/releases/download/v0.13.1/wasm-pack-v0.13.1-aarch64-unknown-linux-musl.tar.gz | tar -xz -C /tmp
           mkdir -p ~/.cargo/bin && cp /tmp/wasm-pack-v0.13.1-aarch64-unknown-linux-musl/wasm-pack ~/.cargo/bin/
       - name: "Test ruff_wasm"
+        if: steps.look.outputs.run == 'true'
         run: |
           cd crates/ruff_wasm
           wasm-pack test --node
       - name: "Test ty_wasm"
+        if: steps.look.outputs.run == 'true'
         run: |
           cd crates/ty_wasm
           wasm-pack test --node
+      - name: "outrun: record test-wasm"
+        if: success() && steps.look.outputs.run == 'true'
+        run: .github/outrun/run record test-wasm --key "${{ steps.look.outputs.key }}" --since ${{ steps.start.outputs.at }}
 
   cargo-build-msrv:
     name: "cargo build (msrv)"
     runs-on: outrun-linux-arm64
     needs: determine_changes
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/bench/engine') }}
     timeout-minutes: 20
     env:
       # Line-tables-only debug info: faster builds, backtraces still work.
@@ -580,8 +685,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: "outrun: start"
+        id: start
+        run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
+      - name: "outrun: Bun"
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: "outrun: look build-msrv up"
+        id: look
+        run: .github/outrun/run lookup build-msrv
       # ARK-81 bench: outrun's images have no rustup or gh (GitHub's runner images do).
       - name: "outrun: install rustup and gh"
+        if: steps.look.outputs.run == 'true'
         run: |
           if ! command -v rustup >/dev/null; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
@@ -590,18 +706,25 @@ jobs:
           fi
           if ! command -v gh >/dev/null && [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -qq && sudo apt-get install -y -qq gh >/dev/null; fi
       - uses: SebRollen/toml-action@b1b3628f55fc3a28208d4203ada8b737e9687876 # v1.2.0
+        if: steps.look.outputs.run == 'true'
         id: msrv
         with:
           file: "Cargo.toml"
           field: "workspace.package.rust-version"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.look.outputs.run == 'true'
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/bench/engine' }}
       - name: "Install Rust toolchain"
+        if: steps.look.outputs.run == 'true'
         env:
           MSRV: ${{ steps.msrv.outputs.value }}
         run: rustup default "${MSRV}"
       - name: "Build tests"
+        if: steps.look.outputs.run == 'true'
         env:
           MSRV: ${{ steps.msrv.outputs.value }}
         run: cargo "+${MSRV}" test --no-run --all-features
+      - name: "outrun: record build-msrv"
+        if: success() && steps.look.outputs.run == 'true'
+        run: .github/outrun/run record build-msrv --key "${{ steps.look.outputs.key }}" --since ${{ steps.start.outputs.at }}
